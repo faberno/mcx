@@ -46,8 +46,11 @@
 #include "mcx_core.h"
 #include "mcx_bench.h"
 #include "mcx_mie.h"
-#include "zmat/zmatlib.h"
-#include "ubj/ubj.h"
+
+#ifndef MCX_CONTAINER
+    #include "zmat/zmatlib.h"
+    #include "ubj/ubj.h"
+#endif
 
 /**
  * Macro to load JSON keys
@@ -66,7 +69,7 @@
      : tmp)
 
 #define UBJ_WRITE_KEY(ctx, key,  type, val)    {ubjw_write_key( (ctx), (key)); ubjw_write_##type((ctx), (val));}
-#define UBJ_WRITE_ARRAY(ctx, type, nlen, val)  {ubjw_write_buffer( (ctx), (uint8_t*)(val), (UBJ_TYPE)(JDB_##type), (nlen));}
+#define UBJ_WRITE_ARRAY(ctx, type, nlen, val)  {ubjw_write_buffer( (ctx), (unsigned char*)(val), (UBJ_TYPE)(JDB_##type), (nlen));}
 
 #define ubjw_write_single ubjw_write_float32
 #define ubjw_write_double ubjw_write_float64
@@ -127,9 +130,10 @@ const char* fullopt[] = {"--help", "--interactive", "--input", "--photon",
  * p: scattering counts for computing Jacobians for mus
  * m: momentum transfer in replay
  * r: frequency domain/RF mua Jacobian by replay
+ * l: total path lengths in each voxel
  */
 
-const char outputtype[] = {'x', 'f', 'e', 'j', 'p', 'm', 'r', '\0'};
+const char outputtype[] = {'x', 'f', 'e', 'j', 'p', 'm', 'r', 'l', '\0'};
 
 /**
  * Debug flags
@@ -138,7 +142,7 @@ const char outputtype[] = {'x', 'f', 'e', 'j', 'p', 'm', 'r', '\0'};
  * P: show progress bar
  */
 
-const char debugflag[] = {'R', 'M', 'P', '\0'};
+const char debugflag[] = {'R', 'M', 'P', 'T', '\0'};
 
 /**
  * Recorded fields for detected photons
@@ -273,7 +277,9 @@ void mcx_initcfg(Config* cfg) {
     cfg->energytot = 0.f;
     cfg->energyabs = 0.f;
     cfg->energyesc = 0.f;
+#ifndef MCX_CONTAINER
     cfg->zipid = zmZlib;
+#endif
     cfg->omega = 0.f;
     cfg->lambda = 0.f;
     /*cfg->his=(History){{'M','C','X','H'},1,0,0,0,0,0,0,1.f,{0,0,0,0,0,0,0}};*/   /** This format is only supported by C99 */
@@ -437,6 +443,7 @@ void mcx_clearcfg(Config* cfg) {
     mcx_initcfg(cfg);
 }
 
+#ifndef MCX_CONTAINER
 
 /**
  * @brief Save volumetric output (fluence etc) to an Nifty format binary file
@@ -639,7 +646,7 @@ void mcx_savebnii(float* vol, int ndim, uint* dims, float* voxelsize, char* name
 
     if (cfg->outputtype >= 0) {
         const char* typestr[] = {"MCX volumetric output: Fluence rate (W/mm^2)", "MCX volumetric output: Fluence (J/mm^2)",
-                                 "MCX volumetric output: Energy density (J/mm^3)", "MCX volumetric output: Jacobian for mua (J/mm)", "MCX volumetric output: Scattering count",
+                                 "MCX volumetric output: Voxel-wise energy deposit (J)", "MCX volumetric output: Jacobian for mua (J/mm)", "MCX volumetric output: Scattering count",
                                  "MCX volumetric output: Partial momentum transfer"
                                 };
         UBJ_WRITE_KEY(root, "Description", string, typestr[(int)cfg->outputtype]);
@@ -775,7 +782,7 @@ void mcx_savejnii(float* vol, int ndim, uint* dims, float* voxelsize, char* name
 
     if (cfg->outputtype >= 0) {
         const char* typestr[] = {"MCX volumetric output: Fluence rate (W/mm^2)", "MCX volumetric output: Fluence (J/mm^2)",
-                                 "MCX volumetric output: Energy density (J/mm^3)", "MCX volumetric output: Jacobian for mua (J/mm)", "MCX volumetric output: Scattering count",
+                                 "MCX volumetric output: Voxel-wise energy deposit (J)", "MCX volumetric output: Jacobian for mua (J/mm)", "MCX volumetric output: Scattering count",
                                  "MCX volumetric output: Partial momentum transfer"
                                 };
         cJSON_AddStringToObject(hdr, "Description", typestr[(int)cfg->outputtype]);
@@ -1130,6 +1137,8 @@ void mcx_savejdet(float* ppath, void* seeds, uint count, int doappend, Config* c
     }
 }
 
+#endif
+
 /**
  * @brief Print a message to the console or a log file
  *
@@ -1223,6 +1232,8 @@ float mcx_updatemua(unsigned int mediaid, Config* cfg) {
 void mcx_flush(Config* cfg) {
 #if defined(MCX_CONTAINER) && (defined(MATLAB_MEX_FILE) || defined(OCTAVE_API_VERSION_NUMBER))
     mcx_matlab_flush();
+#elif defined(PYBIND11_VERSION_MAJOR)
+    mcx_python_flush();
 #else
     fflush(cfg->flog);
 #endif
@@ -1297,6 +1308,8 @@ void mcx_assert(int ret) {
         MCX_ERROR(ret, "assert error");
     }
 }
+
+#ifndef MCX_CONTAINER
 
 /**
  * @brief Read simulation settings from a configuration file (.inp or .json)
@@ -1420,6 +1433,8 @@ void mcx_writeconfig(char* fname, Config* cfg) {
     }
 }
 
+#endif
+
 /**
  * @brief Preprocess user input and prepare the cfg data structure
  *
@@ -1443,6 +1458,11 @@ void mcx_preprocess(Config* cfg) {
     cfg->srcdir.x *= tmp;
     cfg->srcdir.y *= tmp;
     cfg->srcdir.z *= tmp;
+
+    if (cfg->debuglevel & MCX_DEBUG_MOVE_ONLY) {
+        cfg->issave2pt = 0;
+        cfg->issavedet = 0;
+    }
 
     for (int i = 0; i < 6; i++)
         if (cfg->bc[i] && mcx_lookupindex(cfg->bc + i, boundarycond)) {
@@ -1716,6 +1736,8 @@ void mcx_prep_polarized(Config* cfg) {
     free(mu);
 }
 
+#ifndef MCX_CONTAINER
+
 /**
  * @brief Preprocess user input and prepare the volumetric domain for simulation
  *
@@ -1762,10 +1784,6 @@ void mcx_prepdomain(char* filename, Config* cfg) {
     }
 
     if (cfg->seed == SEED_FROM_FILE && cfg->seedfile[0]) {
-        if (!(cfg->outputtype == otJacobian || cfg->outputtype == otWP || cfg->outputtype == otDCS  || cfg->outputtype == otRF)) {
-            MCX_FPRINTF(stderr, S_RED "replay is detected but the output datatype (-O) is not one of j,p,m or r\n" S_RESET);
-        }
-
         if (strstr(cfg->seedfile, ".jdat") != NULL) {
             mcx_loadseedjdat(cfg->seedfile, cfg);
         } else {
@@ -3271,6 +3289,8 @@ void mcx_loadvolume(char* filename, Config* cfg, int isbuf) {
     }
 }
 
+#endif
+
 /**
  * @brief Initialize the replay data structure from detected photon data - in embedded mode (MATLAB/Python)
  *
@@ -3325,8 +3345,9 @@ void mcx_replayinit(Config* cfg, float* detps, int dimdetps[2], int seedbyte) {
             cfg->replay.detid[cfg->nphoton] = (hasdetid) ? (int) (detps[i * dimdetps[0]]) : 1;
 
             for (j = hasdetid; j < cfg->medianum - 1 + hasdetid; j++) {
-                plen = detps[i * dimdetps[0] + offset + j] * cfg->unitinmm;
+                plen = detps[i * dimdetps[0] + offset + j];
                 cfg->replay.weight[cfg->nphoton] *= expf(-cfg->prop[j - hasdetid + 1].mua * plen);
+                plen *= cfg->unitinmm;
                 cfg->replay.tof[cfg->nphoton] += plen * R_C0 * cfg->prop[j - hasdetid + 1].n;
             }
 
@@ -3500,6 +3521,8 @@ void mcx_validatecfg(Config* cfg, float* detps, int dimdetps[2], int seedbyte) {
     cfg->his.savedetflag = cfg->savedetflag;
     mcx_replayinit(cfg, detps, dimdetps, seedbyte);
 }
+
+#ifndef MCX_CONTAINER
 
 /**
  * @brief Load previously saved photon seeds from an .jdat file for replay
@@ -3696,6 +3719,8 @@ void mcx_loadseedfile(Config* cfg) {
 
     fclose(fp);
 }
+
+#endif
 
 /**
  * @brief Convert a row-major (C/C++) array to a column-major (MATLAB/FORTRAN) array
@@ -3975,6 +4000,8 @@ void  mcx_maskdet(Config* cfg) {
  * @param[in] cfg: simulation configuration
  */
 
+#ifndef MCX_CONTAINER
+
 void mcx_dumpmask(Config* cfg) {
     char fname[MAX_FULL_PATH];
 
@@ -4008,7 +4035,6 @@ void mcx_dumpmask(Config* cfg) {
         exit(0);
     }
 }
-
 
 /**
  * @brief Decode an ND array from JSON/JData construct and output to a volumetric array
@@ -4176,6 +4202,7 @@ int  mcx_jdataencode(void* vol, int ndim, uint* dims, char* type, int byte, int 
     return ret;
 }
 
+#endif
 
 /**
  * @brief Print a progress bar
@@ -4327,6 +4354,8 @@ int mcx_remap(char* opt) {
 
     return 1;
 }
+
+#ifndef MCX_CONTAINER
 
 /**
  * @brief Main function to read user command line options
@@ -4777,6 +4806,8 @@ void mcx_parsecmd(int argc, char* argv[], Config* cfg) {
     }
 }
 
+#endif
+
 /**
  * @brief Parse the debug flag in the letter format
  *
@@ -4867,7 +4898,7 @@ int mcx_lookupindex(char* key, const char* index) {
  */
 
 void mcx_version(Config* cfg) {
-    const char ver[] = "$Rev::      $v2022";
+    const char ver[] = "$Rev::      $v2022.10";
     int v = 0;
     sscanf(ver, "$Rev::%x", &v);
     MCX_FPRINTF(cfg->flog, "MCX Revision %x\n", v);
@@ -4894,6 +4925,8 @@ int mcx_isbinstr(const char* str) {
 
     return 1;
 }
+
+#ifndef MCX_CONTAINER
 
 /**
  * @brief Run MCX simulations from a JSON input in a persistent session
@@ -4928,6 +4961,8 @@ int mcx_run_from_json(char* jsonstr) {
     return 0;
 }
 
+#endif
+
 /**
  * @brief Print MCX output header
  *
@@ -4946,7 +4981,7 @@ void mcx_printheader(Config* cfg) {
 ###############################################################################\n\
 #    The MCX Project is funded by the NIH/NIGMS under grant R01-GM114365      #\n\
 ###############################################################################\n\
-$Rev::      $ v2022 $Date::                       $ by $Author::              $\n\
+$Rev::      $v2022.10$Date::                       $ by $Author::             $\n\
 ###############################################################################\n" S_RESET);
 }
 
@@ -5058,11 +5093,14 @@ where possible parameters include (the first value in [*|*] is the default)\n\
 \n"S_BOLD S_CYAN"\
 == Output options ==\n" S_RESET"\
  -s sessionid  (--session)     a string to label all output file names\n\
- -O [X|XFEJPMR] (--outputtype) X - output flux, F - fluence, E - energy density\n\
+ -O [X|XFEJPMRL](--outputtype) X - output flux, F - fluence, E - energy deposit\n\
     /case insensitive/         J - Jacobian (replay mode),   P - scattering, \n\
 			       event counts at each voxel (replay mode only)\n\
                                M - momentum transfer; R - RF/FD Jacobian\n\
- -d [1|0]      (--savedet)     1 to save photon info at detectors; 0 not save\n\
+                               L - total pathlength\n\
+ -d [1|0-3]    (--savedet)     1 to save photon info at detectors; 0 not save\n\
+                               2 reserved, 3 terminate simulation when detected\n\
+                               photon buffer is filled\n\
  -w [DP|DSPMXVW](--savedetflag)a string controlling detected photon data fields\n\
     /case insensitive/         1 D  output detector ID (1)\n\
                                2 S  output partial scat. even counts (#media)\n\
@@ -5087,17 +5125,17 @@ where possible parameters include (the first value in [*|*] is the default)\n\
  -S [1|0]      (--save2pt)     1 to save the flux field; 0 do not save\n\
  -F [mc2|...] (--outputformat) fluence data output format:\n\
                                mc2 - MCX mc2 format (binary 32bit float)\n\
-                               jnii - JNIfTI format (http://openjdata.org)\n\
-                               bnii - Binary JNIfTI (http://openjdata.org)\n\
+                               jnii - JNIfTI format (https://neurojson.org)\n\
+                               bnii - Binary JNIfTI (https://neurojson.org)\n\
                                nii - NIfTI format\n\
                                hdr - Analyze 7.5 hdr/img format\n\
                                tx3 - GL texture data for rendering (GL_RGBA32F)\n\
 	the bnii/jnii formats support compression (-Z) and generate small files\n\
 	load jnii (JSON) and bnii (UBJSON) files using below lightweight libs:\n\
-	  MATLAB/Octave: JNIfTI toolbox   https://github.com/fangq/jnifti, \n\
-	  MATLAB/Octave: JSONLab toolbox  https://github.com/fangq/jsonlab, \n\
+	  MATLAB/Octave: JNIfTI toolbox   https://github.com/NeuroJSON/jnifti,\n\
+	  MATLAB/Octave: JSONLab toolbox  https://github.com/NeuroJSON/jsonlab,\n\
 	  Python:        PyJData:         https://pypi.org/project/jdata\n\
-	  JavaScript:    JSData:          https://github.com/fangq/jsdata\n\
+	  JavaScript:    JSData:          https://github.com/NeuroJSON/jsdata\n\
  -Z [zlib|...] (--zip)         set compression method if -F jnii or --dumpjson\n\
                                is used (when saving data to JSON/JNIfTI format)\n\
 			       0 zlib: zip format (moderate compression,fast) \n\
@@ -5108,7 +5146,7 @@ where possible parameters include (the first value in [*|*] is the default)\n\
 			       5 lz4: LZ4 format (low compression,extrem. fast)\n\
 			       6 lz4hc: LZ4HC format (moderate compression,fast)\n\
  --dumpjson [-,0,1,'file.json']  export all settings, including volume data using\n\
-                               JSON/JData (http://openjdata.org) format for \n\
+                               JSON/JData (https://neurojson.org) format for\n\
 			       easy sharing; can be reused using -f\n\
 			       if followed by nothing or '-', mcx will print\n\
 			       the JSON to the console; write to a file if file\n\
@@ -5125,9 +5163,10 @@ where possible parameters include (the first value in [*|*] is the default)\n\
 == Debug options ==\n" S_RESET"\
  -D [0|int]    (--debug)       print debug information (you can use an integer\n\
   or                           or a string by combining the following flags)\n\
- -D [''|RMP]                   1 R  debug RNG\n\
+ -D [''|RMPT]                  1 R  debug RNG\n\
     /case insensitive/         2 M  store photon trajectory info\n\
                                4 P  print progress bar\n\
+                               8 T  save trajectory data only, disable flux/detp\n\
       combine multiple items by using a string, or add selected numbers together\n\
 \n"S_BOLD S_CYAN"\
 == Additional options ==\n" S_RESET"\
